@@ -362,6 +362,45 @@ problems"). It prints
 every verdict and returns a failure status if any required test fails, skips or is missing. Check the printed
 verdicts for failures outside the required set.
 
+## The Windows runtime under AddressSanitizer
+
+The Linux jobs run the portable subset of the runtime tests under ASan (#34); the shims and the D3D12 layer are
+Windows-only. `LEONIDA_ASAN` builds the Windows runtime and all its tests with MSVC's `/fsanitize=address`. It needs
+the Visual Studio component "C++ AddressSanitizer" (`clang_rt.asan_dynamic-x86_64.dll` next to `cl.exe`), and a
+RelWithDebInfo or Release build: `/fsanitize=address` does not combine with Debug's `/RTC1`. Use a build folder of
+its own:
+
+```powershell
+cmake -S runtime -B runtime/build-asan -DLEONIDA_ASAN=ON
+cmake --build runtime/build-asan --config RelWithDebInfo
+ctest --test-dir runtime/build-asan -C RelWithDebInfo --output-on-failure
+```
+
+ctest puts the compiler's folder at the front of each test's `PATH`, so the tests find the ASan runtime DLL without
+a Developer prompt. To run a test program by hand, put that folder on `PATH` yourself. A report stops the test with
+`ERROR: AddressSanitizer:` and the stack.
+
+The images the loader tests map into the process (the targets built from `runtime/test/fixtures/`, and the
+fixtures linked with `/NODEFAULTLIB`) are built without ASan. `rt::Loader` maps them without the ASan runtime's
+start-up for that module, and a fixture with no CRT cannot link the ASan libraries (LNK1394). Their native runs, the
+reference the loader tests compare against, are not sanitized either.
+
+Measured on `main` `ec91d695` (RTX 3060, NVIDIA 621.24, Windows 11 build 26300, MSVC 19.44.35230,
+`ctest -j 4`, `LLVM_MC` set): all 503 tests are built. 485 pass and 11 skip as in an ordinary build (9 need the
+title's files or other content folders, such as `LEONIDA_GAME_DIR`; `vk_sync_validation` needs `LEONIDA_VK_VALIDATION`;
+`d3d12_rgb9e5_rtv` needs RGB9E5 render targets). `gameinput` and `gameinput_script` are disabled (no SDL3). No test
+stopped with an ASan report. `xbox_present` and `d3d12_set_descriptor_heaps` fail on this `main` without ASan as well
+(#2259, #2153).
+
+Some tests fail now and then under `-j 4` and pass when run alone, because the instrumented tests are slower and use
+more memory:
+- `context_concurrent_detach` and `xbox_cbv_vectors` hit their timeouts after their last check.
+- `dstorage` saw requests still pending (`E_PENDING`) when it read their status.
+- `xmem`, `xmem_write_watch` (the charge for 512 written pages) and `xs_proxy_mock` (slot 133 cannot commit a 174 MiB
+  range) measure the process's own memory.
+- `xbox_gpu_label_completion` hit its 20-second timeout once in three full runs on `8564bb48`. Alone it takes under a
+  second, so it may be a hang rather than a slow run (#1836 fixes a deadlock in the same completions).
+
 ## GPUs with 32-wide subgroups (NVIDIA, Intel, Apple)
 
 The game's shaders are mostly wave64. A GPU that can't run 64-wide compute subgroups skips the wave64 tests

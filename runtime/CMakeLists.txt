@@ -16,6 +16,23 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "gta6rt must be built for x64 (run from an x64 Native Tools prompt or vcvars64.bat)")
 endif()
 
+# LEONIDA_ASAN (RT-ASAN-WINDOWS): the Windows runtime, its shims and their tests built with MSVC's AddressSanitizer,
+# so that ctest also reports reads and writes outside an object. Every target gets the flag here; the block at the
+# end of this file takes it off the images the loader tests map (test/fixtures, and the CRT-free fixtures), which run
+# without the ASan runtime having started in them. /bigobj: the instrumented tests of the present path pass the
+# object-file section limit. Use RelWithDebInfo or Release: /fsanitize=address does not combine with a Debug build's
+# /RTC1. docs/testing.md has the command and the tests that cannot run this way.
+option(LEONIDA_ASAN "Build the Windows runtime and its tests with AddressSanitizer (MSVC)" OFF)
+set(LEONIDA_ASAN_FLAG "$<$<COMPILE_LANGUAGE:C,CXX>:/fsanitize=address>")
+if(LEONIDA_ASAN)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    message(FATAL_ERROR "LEONIDA_ASAN is set up for MSVC (cl.exe) only; "
+                        "pe_loader_fuzz has its own LEONIDA_LOADER_FUZZ_ASAN for clang-cl")
+  endif()
+  add_compile_options("${LEONIDA_ASAN_FLAG}" "$<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>")
+  add_link_options(/INCREMENTAL:NO)
+endif()
+
 # Portable root-signature model + packer to user SGPRs (no d3d12.h, no windows.h), and the host CPU preflight of
 # --init/--run (src/host_cpu.h). Built on every OS, so their tests run in the Linux and macOS jobs as well as with the
 # Windows runtime.
@@ -4890,4 +4907,52 @@ if(WIN32 AND MSVC)
     endif()
     target_sources(${_target} PRIVATE $<TARGET_OBJECTS:gta6rt_crt_timed_wait>)
   endforeach()
+endif()
+
+# LEONIDA_ASAN, second half (the option is at the top of this file): the images a loader test maps into the process
+# are built without AddressSanitizer. Mapped by rt::Loader, their code runs without the ASan runtime's own start-up
+# for that module, and a fixture linked with /NODEFAULTLIB has no CRT for the runtime to hook, so its link cannot name
+# the ASan libraries (LNK1394). They also get an uninstrumented copy of crt_timed_wait (the block above links it into
+# every /MD image), or that one object would still import the ASan runtime. Every test finds the ASan runtime DLL
+# through its PATH, which also covers the programs a test copies to a temporary folder before running them.
+if(LEONIDA_ASAN)
+  add_library(leonida_crt_timed_wait_plain OBJECT src/crt_timed_wait.cpp)
+  target_compile_definitions(leonida_crt_timed_wait_plain PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(leonida_crt_timed_wait_plain PRIVATE /W4 /permissive- /utf-8)
+  get_property(_leonida_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_target IN LISTS _leonida_targets)
+    get_target_property(_type ${_target} TYPE)
+    if(NOT _type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY|STATIC_LIBRARY|OBJECT_LIBRARY)$")
+      continue()
+    endif()
+    get_target_property(_sources ${_target} SOURCES)
+    get_target_property(_link_options ${_target} LINK_OPTIONS)
+    set(_mapped FALSE)
+    if("/NODEFAULTLIB" IN_LIST _link_options)
+      set(_mapped TRUE)
+    endif()
+    foreach(_source IN LISTS _sources)
+      if(_source MATCHES "(^|/)test/fixtures/")
+        set(_mapped TRUE)
+      endif()
+    endforeach()
+    if(_mapped OR _target STREQUAL "leonida_crt_timed_wait_plain")
+      get_target_property(_options ${_target} COMPILE_OPTIONS)
+      list(REMOVE_ITEM _options "${LEONIDA_ASAN_FLAG}")
+      set_target_properties(${_target} PROPERTIES COMPILE_OPTIONS "${_options}")
+    endif()
+    if(_mapped AND "$<TARGET_OBJECTS:gta6rt_crt_timed_wait>" IN_LIST _sources)
+      list(REMOVE_ITEM _sources "$<TARGET_OBJECTS:gta6rt_crt_timed_wait>")
+      list(APPEND _sources "$<TARGET_OBJECTS:leonida_crt_timed_wait_plain>")
+      set_target_properties(${_target} PROPERTIES SOURCES "${_sources}")
+    endif()
+  endforeach()
+  get_filename_component(_leonida_cc_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  if(NOT EXISTS "${_leonida_cc_dir}/clang_rt.asan_dynamic-x86_64.dll")
+    message(WARNING "LEONIDA_ASAN: clang_rt.asan_dynamic-x86_64.dll is not next to ${CMAKE_CXX_COMPILER} "
+                    "(the Visual Studio \"C++ AddressSanitizer\" component); the tests will not start")
+  endif()
+  get_property(_leonida_tests DIRECTORY PROPERTY TESTS)
+  set_property(TEST ${_leonida_tests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+               "PATH=path_list_prepend:${_leonida_cc_dir}")
 endif()

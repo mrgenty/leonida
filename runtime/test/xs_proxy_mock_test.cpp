@@ -2741,8 +2741,8 @@ int check_slot70() {
         void* device = make_device(mock, level, true);
         EXPECT(device && xs::device_slot_overridden(70));
         xs::reset_device_proxy_stats();
-        const std::uint32_t words[8] = {0x1000, 0, 0, 0, 0, 0, 0, 0};
-        const std::uint32_t view[8] = {};
+        const std::uint32_t words[14] = {0x1000};  // a D3D12_RESOURCE_DESC (56 bytes): slot 70 reads all of it
+        const std::uint32_t view[12] = {};         // a D3D12_SHADER_RESOURCE_VIEW_DESC and the VA after it (48 bytes)
         const std::uint64_t destination = 0x7000;
         raw(device, 70, word(words), word(view), destination);
         EXPECT(mock->calls[70] == 0 && xs::device_slot_hits(70) == 1);

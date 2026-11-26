@@ -4653,6 +4653,22 @@ static bool accessible_range(const void* ptr, std::size_t bytes, bool writable) 
 }
 
 
+// Reads eight bytes that may lie outside the object the caller passed: slot 14 below looks at what follows a PC
+// description to tell the console's layout from the PC's. accessible_range has already said the bytes are readable;
+// the function is left out of AddressSanitizer's instrumentation and reads bytewise (no intercepted memcpy), so a
+// sanitized build does not stop at the probe itself.
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((no_sanitize("address")))
+#elif defined(_MSC_VER)
+__declspec(no_sanitize_address)
+#endif
+std::uint64_t probe_u64(const void* address) {
+    const volatile std::uint8_t* bytes = static_cast<const volatile std::uint8_t*>(address);
+    std::uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= std::uint64_t(bytes[i]) << (8 * i);
+    return value;
+}
+
 HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_HEAP_DESC* desc, const IID* riid,
                                      void** out) {
     note_slot(14);
@@ -4679,10 +4695,8 @@ HRESULT proxy_create_descriptor_heap(DeviceProxy* self, const D3D12_DESCRIPTOR_H
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(desc);
         const void* tail = bytes + sizeof(D3D12_DESCRIPTOR_HEAP_DESC);
         if (accessible_range(tail, sizeof(std::uint64_t) * 2, false)) {
-            std::uint64_t address = 0;
-            std::uint64_t size = 0;
-            std::memcpy(&address, tail, sizeof(address));
-            std::memcpy(&size, bytes + sizeof(D3D12_DESCRIPTOR_HEAP_DESC) + sizeof(address), sizeof(size));
+            const std::uint64_t address = probe_u64(tail);
+            const std::uint64_t size = probe_u64(bytes + sizeof(D3D12_DESCRIPTOR_HEAP_DESC) + sizeof(address));
             const auto stride = self->real->GetDescriptorHandleIncrementSize(desc->Type);
             // LOCAL DIAGNOSTIC: what the title passes on slot 14, and whether the console path takes it
             if (leonida::local_diagnostics()) {
