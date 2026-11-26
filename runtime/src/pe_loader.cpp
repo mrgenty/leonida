@@ -202,15 +202,18 @@ std::vector<TlsCloneRecord>* g_tls_clones = nullptr;
 // The move of module TLS index 0 (see kMainImageSlot): done at most once, by reserve_tls_index0 under
 // g_tls_alloc_mutex. `why` is the reason it was not done, for the executable that then maps with a helper index.
 // Constant-initialized only (no std::string): gta6rt reserves from a CRT initializer that runs before the dynamic
-// initializers of this file, which would otherwise reset what it wrote.
+// initializers of this file, which would otherwise reset what it wrote. constinit holds the compiler to that. A char
+// array initialized from a string literal is not a constant initializer for MSVC 19.44: with optimization the
+// initializer was folded away, but with /fsanitize=address it ran after the move and the trace lost the owner. So
+// `why` starts empty, which reads as "not called".
 struct Index0Move {
     bool moved = false;
     bool traced = false;    // the startup trace opens after the move; the first executable map reports it
     TlsHostModule home;     // the clone whose index holds the owner's TLS from now on; never freed
     char owner[260] = {};   // UTF-8 file name of the image that held index 0
-    char why[160] = "reserve_tls_index0 was not called at process start";
+    char why[160] = {};     // empty: reserve_tls_index0 was not called at process start
 };
-Index0Move g_index0;
+constinit Index0Move g_index0;
 
 // Frees every TLS helper clone recorded for a mapped DLL's slot and deletes its files. ensure_tls_host registers the
 // wrapper with atexit when it records the first clone; the --run path in main() must also call this directly before
@@ -1867,7 +1870,10 @@ void Loader::initialize_tls(Module& m) {
                 std::fprintf(stderr,
                              "[rt] loader: %s does not get module TLS index 0 (%s); its code built with /GA would use "
                              "another module's TLS\n",
-                             m.name.c_str(), g_index0.moved ? "another mapped executable holds it" : g_index0.why);
+                             m.name.c_str(),
+                             g_index0.moved   ? "another mapped executable holds it"
+                             : g_index0.why[0] ? g_index0.why
+                                               : "reserve_tls_index0 was not called at process start");
             }
         }
         if (slot == kTlsSlotCount) {
